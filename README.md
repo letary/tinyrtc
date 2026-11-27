@@ -21,7 +21,7 @@ apple/     Swift package: capture, VideoToolbox, the voice-processing audio unit
 android/   Gradle module `tinyrtc` (Kotlin + one JNI library holding the core) and a demo app; docs/platform-api.md
 mediaserver/ the media server (mediaserver/README.md): rooms it forwards, and the blind relay of a 1:1 call; one
            UDP port, a private HTTP API for the backend of an app
-tools/     peer/ = a desktop peer a real browser calls (node interop.mjs)
+tools/     peer/ = a desktop peer a real browser calls (node interop.mjs); release.sh = a release (below)
 ```
 
 Who does what in a call:
@@ -67,3 +67,6 @@ checksums.txt                                               sha256 of the two fi
 
 The last three are the files of the GitHub Release. The Kotlin and Swift sources of the platform
 halves are the tag's android/ and apple/ folders.
+
+`tools/release.sh X.Y.Z` makes one from a clean main: the version in both manifests and both
+Cargo.lock, the commit `chore: vX.Y.Z`, the tag, and (it asks first; `--push` does not) the push.
