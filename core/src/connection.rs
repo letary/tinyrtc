@@ -54,6 +54,7 @@ use std::time::{Duration, Instant};
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::config::Fingerprint;
+use str0m::error::{ProtoError, RtcError, SctpError};
 use str0m::format::Codec;
 use str0m::media::{KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
@@ -77,6 +78,8 @@ const RESTART_AFTER: Duration = Duration::from_secs(2);
 /// off, a muted microphone). Longer than any gap of a live stream: a low frame rate, Opus's
 /// comfort-noise interval.
 const QUIET_AFTER: Duration = Duration::from_millis(600);
+/// A close that str0m refuses (its SCTP handshake is under way) waits this long for the handshake.
+const CLOSE_GRACE: Duration = Duration::from_secs(1);
 /// At most one keyframe request per this long, towards the other side.
 const KEYFRAME_REQUEST_EVERY: Duration = Duration::from_secs(1);
 /// A STUN server is asked 5 times over ~5 s (250 ms, doubling): a call setup does not wait the
@@ -607,12 +610,45 @@ impl Driver {
                 Err(RecvTimeoutError::Timeout) => self.tick(),
             }
         }
-        // `close` says goodbye (RTCP BYE, the SCTP shutdown, DTLS close_notify) and the poll sends
-        // it; `disconnect` would only go silent, and the other side would wait out a timeout.
-        if !self.dead && self.rtc.close().is_ok() {
-            self.drain();
-        }
+        self.goodbye(&rx);
         self.set_state(State::Closed);
+    }
+
+    /// `close` says goodbye (RTCP BYE, the SCTP shutdown, DTLS close_notify) and the poll sends
+    /// it; `disconnect` would only go silent, and the other side would wait out a timeout.
+    ///
+    /// str0m refuses to close while its SCTP handshake is under way (sctp-proto shuts down only an
+    /// established association), and the refusal comes before the close_notify is queued. That
+    /// is the moment just after `Connected`: so the handshake is given `CLOSE_GRACE` to finish —
+    /// datagrams and timers only, the API is gone — and the close is tried again.
+    fn goodbye(&mut self, rx: &Receiver<Command>) {
+        let give_up = Instant::now() + CLOSE_GRACE;
+        while !self.dead {
+            if self.rtc.close().is_ok() {
+                self.drain();
+                return;
+            }
+            // Without a secured path the handshake has nothing to finish on: silence, as before.
+            let path = matches!(self.ice, IceConnectionState::Connected | IceConnectionState::Completed);
+            if !self.secured || !path {
+                return;
+            }
+            let deadline = self.drain().min(give_up);
+            let now = Instant::now();
+            if self.dead || now >= give_up {
+                return;
+            }
+            match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+                Ok(datagram @ Command::Datagram { .. }) => self.command(datagram),
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    if self.rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
     }
 
     /// Polls str0m dry; returns when the driver must wake next.
@@ -628,6 +664,14 @@ impl Driver {
                     let _ = self.socket.send_to(&t.contents, t.destination);
                 }
                 Ok(Output::Event(event)) => self.event(event),
+                // The other side said goodbye (its close_notify) while our SCTP handshake was
+                // under way: str0m's own close is refused then (see `goodbye`), and that refusal
+                // comes out here in place of `Closed`. A poll has no other way to this error.
+                Err(RtcError::Sctp(SctpError::Proto(ProtoError::ErrShutdownNonEstablished))) => {
+                    self.dead = true;
+                    self.set_state(State::Closed);
+                    return idle;
+                }
                 // One undecodable packet is an error of that packet (str0m dropped its frame and
                 // goes on); only an `Rtc` that says it is finished is finished.
                 Err(_) if self.rtc.is_alive() => {}

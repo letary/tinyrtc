@@ -224,6 +224,36 @@ fn a_dead_connection_says_closed() {
     assert_eq!(b.channel_open("x", ChannelOptions::default()), Err(Error::Closed));
 }
 
+/// `Connected` is ICE and DTLS; the SCTP handshake starts after it, and str0m refuses to close in
+/// the middle of one. A side dropped at that moment must still say goodbye.
+#[test]
+fn a_connection_dropped_the_moment_it_connects_says_closed() {
+    let wait_connected = |events: &Receiver<Event>| loop {
+        match events.recv_timeout(Duration::from_secs(10)).expect("connected") {
+            Event::State(State::Connected) => break,
+            _ => {}
+        }
+    };
+    for round in 0..12 {
+        let (a, ea) = peer();
+        let (b, eb) = peer();
+        let offer = a.offer(false).unwrap();
+        a.accept_answer(&b.accept_offer(&offer).unwrap()).unwrap();
+        // Either side: only one of them starts the SCTP handshake.
+        let (dropped, events, left, left_events) = if round % 2 == 0 { (a, ea, b, eb) } else { (b, eb, a, ea) };
+        wait_connected(&events);
+        let at = Instant::now();
+        drop(dropped);
+        assert!(at.elapsed() < Duration::from_secs(3), "round {round}: the drop took {:?}", at.elapsed());
+        let mut seen = Seen::default();
+        until("the other side closed", Duration::from_secs(3), || {
+            seen.take(&left_events);
+            seen.states.last() == Some(&State::Closed)
+        });
+        assert_eq!(left.offer(true), Err(Error::Closed));
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // str0m's SDP API as the other side: a raw `Rtc` of the same profile on its own socket and thread.
 
