@@ -1,0 +1,8 @@
+# The image is built from core/ and mediaserver/ only (mediaserver/Dockerfile); everything else stays out of
+# the build context.
+*
+!core
+!mediaserver
+**/target
+core/tests
+mediaserver/tests

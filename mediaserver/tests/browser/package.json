@@ -1,0 +1,8 @@
+{
+  "name": "tinyrtc-mediaserver-browser",
+  "private": true,
+  "description": "Chrome in a room of the server (node rooms.mjs, driven by tests/browser.rs)",
+  "devDependencies": {
+    "playwright": "^1.65.1"
+  }
+}

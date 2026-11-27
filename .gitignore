@@ -1,0 +1,18 @@
+target/
+tools/peer/target/
+node_modules/
+android/.gradle/
+android/.kotlin/
+android/build/
+android/*/build/
+android/*/.cxx/
+android/local.properties
+android/tinyrtc/core-lib/
+# apple/: the core as an xcframework (build-core.sh), SwiftPM and Xcode outputs
+apple/build/
+apple/TinyRTCCore.xcframework/
+apple/.build/
+apple/.swiftpm/
+apple/Demo/*.swiftpm/.build/
+apple/Demo/*.swiftpm/.swiftpm/
+*.xcresult

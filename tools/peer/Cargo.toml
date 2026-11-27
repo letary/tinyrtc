@@ -1,0 +1,20 @@
+[package]
+name = "tinyrtc-peer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Interop probe: a str0m peer with the tinyrtc profile that a real browser calls, and the same on the library"
+
+# Its own workspace root: tools/peer is not part of any repo-level workspace.
+[workspace]
+
+[dependencies]
+str0m = { version = "0.26.0", default-features = false, features = ["rust-crypto"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
+# src/bin/tinyrtc-core-peer.rs: the same probe on the library's own `Connection`.
+tinyrtc = { path = "../../core" }
+
+# The same patched RustCrypto backend the library ships (core/vendor/README.md), so the browser
+# handshake runs against its certificate.
+[patch.crates-io]
+str0m-rust-crypto = { path = "../../core/vendor/str0m-rust-crypto" }

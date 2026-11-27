@@ -1,0 +1,8 @@
+# The core is built with ONE nightly, named here: the phones' size build rebuilds std
+# (-Zbuild-std, with rust-src) and uses unstable flags (.cargo/config.toml), and a release must
+# come out the same wherever it is built. rustup installs it on the first cargo call in core/.
+# The media server and tools/ are their own crates and build with stable.
+[toolchain]
+channel = "nightly-2026-11-18"
+components = ["rust-src", "llvm-tools"]
+targets = ["aarch64-linux-android", "armv7-linux-androideabi", "aarch64-apple-ios", "aarch64-apple-ios-sim"]

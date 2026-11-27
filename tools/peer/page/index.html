@@ -1,0 +1,279 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>tinyrtc peer interop</title>
+<style>
+  body { font: 13px/1.4 ui-monospace, monospace; background: #111; color: #ddd; margin: 16px; }
+  video { width: 320px; background: #000; margin-right: 8px; }
+  pre { white-space: pre-wrap; }
+  .err { color: #f66; }
+</style>
+</head>
+<body>
+<div><video id="local" autoplay muted playsinline></video><video id="remote" autoplay muted playsinline></video></div>
+<pre id="out">starting…</pre>
+<script>
+// The browser side of the interop probe, against the peer that served this page.
+//   (default)    the browser OFFERS video (H.264 only) + audio + one data channel: POST /offer, the
+//                answer comes back
+//   ?role=answer the peer offers: GET /offer, the browser answers with its camera, microphone and
+//                a data channel of its own (opened in-band on the peer's data line), POST /answer
+//   &restart=1   3 s after connecting, an ICE restart by the side that offered: the browser's
+//                (restartIce, POST /reoffer) or the peer's (GET /restart, POST /answer)
+//   &relay=1     the peer's descriptions carry no candidate: its address comes as the media
+//                server's relay line (GET /candidate, `typ relay`), added with addIceCandidate after
+//                each remote description (an ICE restart's too)
+// window.__stats is kept current from getStats() and the remote <video>.
+const out = document.getElementById('out');
+const params = new URLSearchParams(location.search);
+const role = params.get('role') === 'answer' ? 'answer' : 'offer';
+const stats = window.__stats = {
+  role, phase: 'start', error: null, connectionState: 'new', iceConnectionState: 'new',
+  outboundVideoCodec: null, inboundVideoCodec: null, inboundAudioCodec: null, outboundAudioCodec: null,
+  framesEncoded: 0, framesDecoded: 0, keyFramesDecoded: 0, frameWidth: 0, frameHeight: 0,
+  pliSent: 0, pliReceived: 0, firSent: 0, firReceived: 0, nackSent: 0, videoPacketsLost: 0,
+  audioPacketsReceived: 0, audioPacketsSent: 0,
+  channelState: 'none', channelSent: 0, channelEchoes: 0, channelEchoMismatch: 0, messagesReceived: 0,
+  // `track` events, their kinds, and the frames the remote <video> element presented.
+  tracks: 0, trackKinds: [], remoteVideoFrames: 0, remoteVideoWidth: 0, remoteChannels: [],
+  // ?restart=1: done, the ufrags before and after, the frames decoded and the echoes at that moment.
+  restarted: false, restartUfrags: null, framesDecodedAtRestart: 0, channelEchoesAtRestart: 0,
+  h264Capabilities: [], answerVideoSection: null, offerVideoSection: null, answerSdp: null, offerSdp: null,
+  // The candidates the browser knows of the other side (getStats remote-candidate: type, address,
+  // priority) and the selected pair's remote one; &relay=1: the lines it was given.
+  remoteCandidates: [], selectedRemote: null, relayLines: [],
+};
+window.__fail = (msg) => {
+  stats.error = String(msg);
+  stats.phase = 'failed';
+  out.innerHTML = '<span class="err">FAILED: ' + stats.error + '</span>';
+  console.error('FAILED', msg);
+};
+
+// The video m-section of an SDP, as lines.
+function videoSection(sdp) {
+  const lines = sdp.split(/\r?\n/);
+  const at = lines.findIndex(l => l.startsWith('m=video'));
+  if (at < 0) return null;
+  const rest = lines.slice(at + 1);
+  const end = rest.findIndex(l => l.startsWith('m='));
+  return [lines[at], ...(end < 0 ? rest : rest.slice(0, end))].filter(Boolean);
+}
+
+// All candidates in the description (no trickle in this signaling); mDNS .local ones are useless
+// to the peer, which learns the browser's address from its checks anyway (peer reflexive).
+async function gathered(pc) {
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && resolve();
+    setTimeout(resolve, 3000);
+  });
+  return pc.localDescription.sdp
+    .split('\r\n').filter(l => !(l.startsWith('a=candidate') && / [0-9a-f-]+\.local /i.test(l))).join('\r\n');
+}
+
+function wireChannel(channel) {
+  let seq = 0;
+  const pending = new Set();
+  channel.onopen = () => {
+    stats.channelState = 'open';
+    setInterval(() => {
+      if (channel.readyState !== 'open') return;
+      const msg = 'ping ' + (seq++);
+      pending.add(msg);
+      channel.send(msg);
+      stats.channelSent++;
+    }, 100);
+  };
+  channel.onclose = () => { stats.channelState = 'closed'; };
+  channel.onmessage = (e) => {
+    if (pending.delete(e.data)) stats.channelEchoes++;
+    else stats.channelEchoMismatch++;
+  };
+}
+
+// &relay=1: the peer's address, as the media server's relay line, into the bundle's first line.
+async function addRelay(pc) {
+  if (params.get('relay') !== '1') return;
+  const res = await fetch('/candidate');
+  const line = await res.text();
+  if (!res.ok) throw new Error('no relay line: ' + line);
+  const mid = (pc.remoteDescription.sdp.match(/^a=mid:(\S+)/m) || [])[1];
+  await pc.addIceCandidate({ candidate: line, sdpMid: mid });
+  stats.relayLines.push(line);
+}
+
+async function main() {
+  const media = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, frameRate: 30 }, audio: true });
+  document.getElementById('local').srcObject = media;
+  stats.phase = 'media';
+
+  const pc = window.__pc = new RTCPeerConnection();
+  pc.onconnectionstatechange = () => { stats.connectionState = pc.connectionState; };
+  pc.oniceconnectionstatechange = () => { stats.iceConnectionState = pc.iceConnectionState; };
+  const remote = new MediaStream();
+  const remoteVideo = document.getElementById('remote');
+  pc.ontrack = (e) => {
+    stats.tracks++;
+    stats.trackKinds.push(e.track.kind);
+    remote.addTrack(e.track);
+    remoteVideo.srcObject = remote;
+  };
+  const presented = () => {
+    stats.remoteVideoFrames++;
+    stats.remoteVideoWidth = remoteVideo.videoWidth;
+    remoteVideo.requestVideoFrameCallback(presented);
+  };
+  if ('requestVideoFrameCallback' in remoteVideo) remoteVideo.requestVideoFrameCallback(presented);
+  // Channels the peer opens (the library's own control channel, say): seen, not used.
+  pc.ondatachannel = (e) => { stats.remoteChannels.push(e.channel.label); };
+
+  const caps = RTCRtpReceiver.getCapabilities('video').codecs;
+  const h264 = caps.filter(c => c.mimeType.toLowerCase() === 'video/h264');
+  stats.h264Capabilities = h264.map(c => c.sdpFmtpLine);
+
+  let channel;
+  if (role === 'offer') {
+    const video = pc.addTransceiver(media.getVideoTracks()[0], { direction: 'sendrecv', streams: [media] });
+    pc.addTransceiver(media.getAudioTracks()[0], { direction: 'sendrecv', streams: [media] });
+
+    // H.264 is the only video codec: Constrained Baseline, packetization-mode=1 (the profile). RTX
+    // stays in (paired by apt); everything else (VP8/VP9/AV1, red, ulpfec) goes.
+    // ?h264=all offers every H.264 variant the browser has instead (to see what the peer picks).
+    const cb = h264.filter(c => /packetization-mode=1/.test(c.sdpFmtpLine || '') && /profile-level-id=42e0/i.test(c.sdpFmtpLine || ''));
+    if (!h264.length) throw new Error('this browser offers no H.264 (capabilities: ' + caps.map(c => c.mimeType).join(', ') + ')');
+    if (!cb.length) throw new Error('no H.264 Constrained Baseline packetization-mode=1 (H.264 fmtp: ' + stats.h264Capabilities.join(' | ') + ')');
+    const offered = params.get('h264') === 'all' ? h264 : cb;
+    const rtx = caps.filter(c => c.mimeType.toLowerCase() === 'video/rtx');
+    try {
+      video.setCodecPreferences([...offered, ...rtx]);
+    } catch (e) {
+      video.setCodecPreferences(offered);
+    }
+
+    channel = pc.createDataChannel('data');
+    wireChannel(channel);
+
+    await pc.setLocalDescription(await pc.createOffer());
+    const offer = await gathered(pc);
+    stats.offerSdp = offer;
+    stats.offerVideoSection = videoSection(offer);
+    stats.phase = 'offered';
+
+    const res = await fetch('/offer', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: offer });
+    const text = await res.text();
+    if (!res.ok) throw new Error('peer refused the offer: ' + text);
+    stats.answerSdp = text;
+    stats.answerVideoSection = videoSection(text);
+    await pc.setRemoteDescription({ type: 'answer', sdp: text });
+    await addRelay(pc);
+    stats.phase = 'answered';
+  } else {
+    const res = await fetch('/offer');
+    const offer = await res.text();
+    if (!res.ok) throw new Error('peer made no offer: ' + offer);
+    stats.offerSdp = offer;
+    stats.offerVideoSection = videoSection(offer);
+    stats.phase = 'offered';
+    await pc.setRemoteDescription({ type: 'offer', sdp: offer });
+    await addRelay(pc);
+    // The offer's transceivers take the tracks (they become sendrecv).
+    for (const track of media.getTracks()) pc.addTrack(track, media);
+    channel = pc.createDataChannel('data');
+    wireChannel(channel);
+    await pc.setLocalDescription(await pc.createAnswer());
+    const answer = await gathered(pc);
+    stats.answerSdp = answer;
+    stats.answerVideoSection = videoSection(answer);
+    const posted = await fetch('/answer', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: answer });
+    if (!posted.ok) throw new Error('peer refused the answer: ' + await posted.text());
+    stats.phase = 'answered';
+  }
+
+  setInterval(() => poll(pc, channel).catch(e => console.error(e)), 500);
+  if (params.get('restart') === '1') restartWhenConnected(pc).catch(window.__fail);
+}
+
+const ufragOf = (sdp) => (sdp.match(/a=ice-ufrag:(\S+)/) || [])[1];
+
+async function restartWhenConnected(pc) {
+  while (pc.connectionState !== 'connected') await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 3000));
+  const before = [ufragOf(pc.localDescription.sdp), ufragOf(pc.remoteDescription.sdp)];
+  stats.framesDecodedAtRestart = stats.framesDecoded;
+  stats.channelEchoesAtRestart = stats.channelEchoes;
+  if (role === 'offer') {
+    pc.restartIce();
+    await pc.setLocalDescription(await pc.createOffer());
+    const offer = await gathered(pc);
+    const res = await fetch('/reoffer', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: offer });
+    const text = await res.text();
+    if (!res.ok) throw new Error('peer refused the restart offer: ' + text);
+    await pc.setRemoteDescription({ type: 'answer', sdp: text });
+    await addRelay(pc);
+  } else {
+    const res = await fetch('/restart');
+    const offer = await res.text();
+    if (!res.ok) throw new Error('peer made no restart offer: ' + offer);
+    await pc.setRemoteDescription({ type: 'offer', sdp: offer });
+    await addRelay(pc);
+    await pc.setLocalDescription(await pc.createAnswer());
+    const answer = await gathered(pc);
+    const posted = await fetch('/answer', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: answer });
+    if (!posted.ok) throw new Error('peer refused the restart answer: ' + await posted.text());
+  }
+  stats.restartUfrags = { before, after: [ufragOf(pc.localDescription.sdp), ufragOf(pc.remoteDescription.sdp)] };
+  stats.restarted = true;
+}
+
+async function poll(pc, channel) {
+  const report = await pc.getStats();
+  const codec = (id) => { const c = id && report.get(id); return c ? c.mimeType : null; };
+  report.forEach((s) => {
+    if (s.type === 'outbound-rtp' && s.kind === 'video') {
+      stats.outboundVideoCodec = codec(s.codecId);
+      stats.framesEncoded = s.framesEncoded || 0;
+      stats.pliReceived = s.pliCount || 0;
+      stats.firReceived = s.firCount || 0;
+      stats.encoderImplementation = s.encoderImplementation;
+    } else if (s.type === 'inbound-rtp' && s.kind === 'video') {
+      stats.inboundVideoCodec = codec(s.codecId);
+      stats.framesDecoded = s.framesDecoded || 0;
+      stats.keyFramesDecoded = s.keyFramesDecoded || 0;
+      stats.frameWidth = s.frameWidth || 0;
+      stats.frameHeight = s.frameHeight || 0;
+      stats.pliSent = s.pliCount || 0;
+      stats.firSent = s.firCount || 0;
+      stats.nackSent = s.nackCount || 0;
+      stats.videoPacketsLost = s.packetsLost || 0;
+      stats.decoderImplementation = s.decoderImplementation;
+    } else if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+      stats.inboundAudioCodec = codec(s.codecId);
+      stats.audioPacketsReceived = s.packetsReceived || 0;
+    } else if (s.type === 'outbound-rtp' && s.kind === 'audio') {
+      stats.outboundAudioCodec = codec(s.codecId);
+      stats.audioPacketsSent = s.packetsSent || 0;
+    } else if (s.type === 'data-channel' && s.label === channel.label) {
+      stats.messagesReceived = s.messagesReceived || 0;
+    }
+  });
+  const remotes = [];
+  let transport = null;
+  report.forEach((s) => {
+    if (s.type === 'remote-candidate') remotes.push({ type: s.candidateType, address: s.address, port: s.port, priority: s.priority });
+    if (s.type === 'transport') transport = s;
+  });
+  stats.remoteCandidates = remotes;
+  const pair = transport && transport.selectedCandidatePairId ? report.get(transport.selectedCandidatePairId) : null;
+  const remote = pair ? report.get(pair.remoteCandidateId) : null;
+  stats.selectedRemote = remote ? { type: remote.candidateType, address: remote.address, port: remote.port, priority: remote.priority } : null;
+  stats.connectionState = pc.connectionState;
+  stats.channelState = channel.readyState;
+  out.textContent = JSON.stringify({ ...stats, offerSdp: undefined, answerSdp: undefined }, null, 2);
+}
+
+main().catch(window.__fail);
+</script>
+</body>
+</html>

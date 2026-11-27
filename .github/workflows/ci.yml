@@ -1,0 +1,42 @@
+# The tests of the core and of the media server, on every push and pull request. The release
+# workflow calls this one first: nothing is published from a tree whose tests are red.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The nightly core/rust-toolchain.toml names (core/.cargo/config.toml names an unstable panic
+      # strategy for the phones' size profile).
+      - name: toolchain
+        run: rustup toolchain install --no-self-update
+        working-directory: core
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      # Real sockets on the loopback interface and real time.
+      - run: cargo test --release --locked
+        working-directory: core
+
+  mediaserver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Stable, as its image is built with.
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mediaserver
+      - run: cargo test --release --locked
+        working-directory: mediaserver

@@ -1,0 +1,21 @@
+# The `mobile` profile: release + a panic that stops on the spot, so
+# std's panic formatting and its DWARF symbolizer stay out of the binary. std is rebuilt with it:
+#   cargo ndk -t arm64-v8a build --profile mobile -Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size -Zpanic-immediate-abort
+[profile.mobile]
+inherits = "release"
+panic = "immediate-abort"
+
+# Only the C face is exported: an exported symbol is a root of --gc-sections. No unwind tables: a
+# panic aborts on the spot, so nothing unwinds (measured on arm64: 2,379,576 -> 1,824,088 bytes);
+# the price is that a crash reporter cannot walk back through these frames.
+[target.aarch64-linux-android]
+rustflags = ["-Zdefault-visibility=hidden", "-Zlocation-detail=none", "-Zfmt-debug=none", "-Cforce-unwind-tables=no"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-Zdefault-visibility=hidden", "-Zlocation-detail=none", "-Zfmt-debug=none", "-Cforce-unwind-tables=no"]
+
+[target.aarch64-apple-ios]
+rustflags = ["-Zdefault-visibility=hidden", "-Zlocation-detail=none", "-Zfmt-debug=none", "-Cforce-unwind-tables=no"]
+
+[target.aarch64-apple-ios-sim]
+rustflags = ["-Zdefault-visibility=hidden", "-Zlocation-detail=none", "-Zfmt-debug=none", "-Cforce-unwind-tables=no"]

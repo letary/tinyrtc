@@ -1,0 +1,7 @@
+/* The one symbol libtinyrtc_jni.so exports: the natives of dev.tinyrtc.Native are registered in it. */
+{
+  global:
+    JNI_OnLoad;
+  local:
+    *;
+};

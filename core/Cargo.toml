@@ -1,0 +1,45 @@
+[package]
+name = "tinyrtc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["crypto-rust"]
+crypto-rust = ["str0m/rust-crypto"]
+crypto-apple = ["str0m/apple-crypto"]
+crypto-win = ["str0m/wincrypto"]
+crypto-awslc = ["str0m/aws-lc-rs"]
+
+[dependencies]
+str0m = { version = "0.26.0", default-features = false }
+
+[build-dependencies]
+# Compiles libopus (vendor/opus) from build.rs: no cmake / autotools / pkg-config on the build machine.
+cc = { version = "1.11", features = ["parallel"] }
+
+[dev-dependencies]
+# Both already in the tree (dimpl's); only the certificate test reads them.
+p256 = "0.14"
+x509-cert = { version = "0.3", default-features = false }
+
+# On a Mac both backends are at hand: the tests make an iPhone's side (CryptoKit) and an Android's
+# side (RustCrypto) shake hands in one process.
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+str0m-apple-crypto = "0.7.0"
+str0m-rust-crypto = "0.7.0"
+
+# str0m-rust-crypto with its certificate made on RustCrypto, so aws-lc leaves the tree
+# (vendor/README.md: what changed and why).
+[patch.crates-io]
+str0m-rust-crypto = { path = "vendor/str0m-rust-crypto" }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

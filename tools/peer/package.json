@@ -1,0 +1,11 @@
+{
+  "name": "tinyrtc-peer-interop",
+  "private": true,
+  "description": "Chrome <-> str0m interop probe for the tinyrtc profile (node interop.mjs)",
+  "scripts": {
+    "interop": "node interop.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1"
+  }
+}
